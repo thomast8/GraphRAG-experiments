@@ -38,7 +38,7 @@ from neo4j_graphrag.exceptions import LLMGenerationError
 logging.getLogger("pypdf").setLevel(logging.ERROR)
 logger = logging.getLogger(__name__)
 
-ENV_FILE = Path(__file__).resolve().parent / ".env.graphrag"
+ENV_FILE = Path(__file__).resolve().parent / ".env"
 OUTPUTS_DIR = Path(__file__).resolve().parent / "outputs"
 FAILED_JSON_DIR = OUTPUTS_DIR / "failed_json"
 

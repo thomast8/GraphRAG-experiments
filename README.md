@@ -11,7 +11,7 @@
 - Base setup: `uv sync`
 - Notebook extras (for `end-to-end-lupus.ipynb`): `uv sync --extra notebook`
 
-Optional `.env.graphrag` (loaded automatically if present):
+Optional `.env` (loaded automatically if present):
 ```
 OPENAI_API_KEY=...
 NEO4J_URI=neo4j://localhost:7687
@@ -19,6 +19,8 @@ NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=password
 NEO4J_DATABASE=graphrag-test
 ```
+
+`cp .env.example .env` to get started.
 
 ## Run
 
