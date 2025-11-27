@@ -5,7 +5,20 @@
 ## Requirements
 - Neo4j reachable at `neo4j://localhost:7687` (defaults baked into the script). The `graphrag-test` database is wiped on each run.
 - `OPENAI_API_KEY` in your shell for embeddings and LLM calls.
-- Python deps installed via `uv` (or `pip`) with the repo’s `pyproject.toml` once added; for now, install the same libraries you were using in the parent sandbox.
+- Python 3.10+ with dependencies from `pyproject.toml`.
+
+## Install
+- Base setup: `uv sync`
+- Notebook extras (for `end-to-end-lupus.ipynb`): `uv sync --extra notebook`
+
+Optional `.env.graphrag` (loaded automatically if present):
+```
+OPENAI_API_KEY=...
+NEO4J_URI=neo4j://localhost:7687
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=password
+NEO4J_DATABASE=graphrag-test
+```
 
 ## Run
 
