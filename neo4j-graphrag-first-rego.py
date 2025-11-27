@@ -2,9 +2,11 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from loguru import logger
 from neo4j import Driver, GraphDatabase
 from neo4j.exceptions import Neo4jError
 from neo4j_graphrag.embeddings import OpenAIEmbeddings
@@ -35,8 +37,65 @@ from neo4j_graphrag.utils.rate_limit import RetryRateLimitHandler
 from pydantic import ValidationError
 from neo4j_graphrag.exceptions import LLMGenerationError
 
+logger.remove()
+logger.add(
+    sys.stderr,
+    colorize=True,
+    format="<green>{time:HH:mm:ss}</green> <level>{level: <8}</level> [<cyan>{name}</cyan>] <level>{message}</level>",
+)
 logging.getLogger("pypdf").setLevel(logging.ERROR)
-logger = logging.getLogger(__name__)
+
+
+class Neo4jNotificationHandler(logging.Handler):
+    """Condense Neo4j notification blobs into short, readable messages."""
+
+    @staticmethod
+    def _extract_field(message: str, field: str) -> Optional[str]:
+        token = f"{field}: "
+        idx = message.find(token)
+        if idx == -1:
+            return None
+        start = idx + len(token)
+        end = message.find("}", start)
+        if end == -1:
+            end = len(message)
+        value = message[start:end].strip()
+        if value.startswith("`") and value.endswith("`"):
+            value = value[1:-1]
+        return value or None
+
+    def emit(self, record: logging.LogRecord) -> None:
+        message = record.getMessage()
+        if "Received notification from DBMS server" not in message:
+            return
+
+        severity = self._extract_field(message, "severity")
+        code = self._extract_field(message, "code")
+        category = self._extract_field(message, "category")
+        title = self._extract_field(message, "title")
+        description = self._extract_field(message, "description")
+
+        # Drop very low-signal informational noise like "index already exists".
+        if severity == "INFORMATION" and code and "IndexOrConstraintAlreadyExists" in code:
+            return
+
+        logger.warning(
+            f"Neo4j notification [{severity or '?'} / {category or '?'}] {code or ''} - {title or ''}"
+        )
+        if description:
+            logger.debug(f"Neo4j notification detail: {description}")
+
+
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("neo4j").setLevel(logging.WARNING)
+runner_logger = logging.getLogger("neo4j_graphrag.experimental.pipeline.config.runner")
+runner_logger.setLevel(logging.WARNING)
+
+neo4j_notif_logger = logging.getLogger("neo4j.notifications")
+neo4j_notif_logger.setLevel(logging.INFO)
+neo4j_notif_logger.handlers.clear()
+neo4j_notif_logger.propagate = False
+neo4j_notif_logger.addHandler(Neo4jNotificationHandler())
 
 ENV_FILE = Path(__file__).resolve().parent / ".env"
 OUTPUTS_DIR = Path(__file__).resolve().parent / "outputs"
@@ -83,9 +142,9 @@ def ensure_database_exists(neo4j_driver: Driver, database: str) -> None:
     try:
         with neo4j_driver.session(database="system") as session:
             session.run(f"CREATE DATABASE `{database}` IF NOT EXISTS")
-            logger.info("Ensured Neo4j database exists: %s", database)
+            logger.info(f"Ensured Neo4j database exists: {database}")
     except Exception as exc:
-        logger.warning("Database creation skipped for %s: %s", database, exc)
+        logger.warning(f"Database creation skipped for {database}: {exc}")
 
 
 # Connect to the Neo4j database
@@ -97,28 +156,25 @@ def resolve_database(neo4j_driver: Driver, configured_db: str) -> str:
     target = configured_db or "neo4j"
     if hasattr(neo4j_driver, "supports_multi_db") and not neo4j_driver.supports_multi_db():
         if target != "neo4j":
-            logger.info(
-                "Server is single-DB; forcing database to 'neo4j' instead of %s",
-                target,
-            )
+            logger.info(f"Server is single-DB; forcing database to 'neo4j' instead of {target}")
         return "neo4j"
     try:
         with neo4j_driver.session(database=target) as session:
             session.run("RETURN 1").consume()
         return target
     except Neo4jError as exc:
-        logger.warning(
-            "Database %s unavailable, falling back to 'neo4j': %s", target, exc
-        )
+        logger.warning(f"Database {target} unavailable, falling back to 'neo4j': {exc}")
         return "neo4j"
 
 
 NEO4J_DATABASE = resolve_database(driver, NEO4J_DATABASE_CONFIGURED)
 ensure_database_exists(driver, NEO4J_DATABASE)
+logger.info(f"Using Neo4j URI={NEO4J_URI} user={NEO4J_USERNAME} database={NEO4J_DATABASE}")
 
 
 def reset_database(neo4j_driver: Driver) -> None:
     """Wipe all nodes and relationships so each run starts fresh."""
+    logger.info(f"Resetting database {NEO4J_DATABASE} before ingestion")
     with neo4j_driver.session(database=NEO4J_DATABASE) as session:
         session.run("MATCH (n) DETACH DELETE n")
 
@@ -307,22 +363,16 @@ class RetryingLLMEntityRelationExtractor(LLMEntityRelationExtractor):
                 last_exception = exc
                 if attempt < self.max_attempts:
                     logger.warning(
-                        "Chunk %s: invalid JSON/format on attempt %s/%s; retrying in %.1fs",
-                        chunk.index,
-                        attempt,
-                        self.max_attempts,
-                        delay,
+                        f"Chunk {chunk.index}: invalid JSON/format on attempt {attempt}/{self.max_attempts}; retrying in {delay:.1f}s"
                     )
                     await asyncio.sleep(delay)
                     delay = min(delay * self.backoff_multiplier, self.max_backoff)
                     continue
 
                 logger.error(
-                    "Chunk %s: LLM response failed JSON/validation after %s attempts",
-                    chunk.index,
-                    self.max_attempts,
+                    f"Chunk {chunk.index}: LLM response failed JSON/validation after {self.max_attempts} attempts"
                 )
-                logger.debug("Final invalid content: %s", llm_result.content)
+                logger.debug(f"Final invalid content: {llm_result.content}")
 
                 if self.failure_dir:
                     try:
@@ -336,15 +386,11 @@ class RetryingLLMEntityRelationExtractor(LLMEntityRelationExtractor):
                         chunk_path.write_text(chunk.text, encoding="utf-8")
                         prompt_path.write_text(prompt, encoding="utf-8")
                         logger.info(
-                            "Wrote failing chunk %s artifacts to %s",
-                            chunk.index,
-                            self.failure_dir,
+                            f"Wrote failing chunk {chunk.index} artifacts to {self.failure_dir}"
                         )
                     except Exception as write_exc:
                         logger.warning(
-                            "Unable to write failing chunk %s response: %s",
-                            chunk.index,
-                            write_exc,
+                            f"Unable to write failing chunk {chunk.index} response: {write_exc}"
                         )
 
                 if self.on_error == OnError.RAISE:
@@ -481,6 +527,7 @@ embedder = OpenAIEmbeddings(
         max_wait=120.0,
     ),
 )
+logger.info("Initialized OpenAI embedder model=text-embedding-3-large")
 
 # Instantiate the LLM
 llm = OpenAILLM(
@@ -504,6 +551,7 @@ llm = OpenAILLM(
         multiplier=3.0,
     ),
 )
+logger.info("Initialized LLM model=gpt-5.1 max_completion_tokens=2000")
 
 # Instantiate the RetryingSimpleKGPipeline for PDF ingestion
 kg_builder = RetryingSimpleKGPipeline(
@@ -525,12 +573,16 @@ kg_builder = RetryingSimpleKGPipeline(
     backoff_multiplier=2.5,
     max_backoff=30.0,
 )
+logger.info(
+    "KG builder configured with chunk_size=500 chunk_overlap=100 max_attempts=4 backoff=(2.0, 2.5, 30.0)"
+)
 
 pdf_path = (
     Path(__file__).resolve().parent
     / "BRD-examples"
     / "Business_Inspection_Policy_Document.pdf"
 )
+logger.info(f"Input PDF path resolved to {pdf_path}")
 
 
 def slugify(value: str) -> str:
@@ -768,19 +820,64 @@ def fetch_rules_ir(neo4j_driver: Driver) -> List[Dict[str, Any]]:
         ir = build_rule_ir(record)
         if ir:
             ir_rules.append(ir)
+    logger.info(f"Fetched {len(ir_rules)} rules from Neo4j")
     return ir_rules
+
+
+def log_graph_summary(neo4j_driver: Driver) -> None:
+    """Log a concise summary of graph contents in Neo4j."""
+    with neo4j_driver.session(database=NEO4J_DATABASE) as session:
+        total_nodes = session.run("MATCH (n) RETURN count(n) AS c").single()["c"]
+        total_rels = session.run(
+            "MATCH ()-[r]->() RETURN count(r) AS c"
+        ).single()["c"]
+
+        node_counts: Dict[str, int] = {}
+        for label in node_types:
+            result = session.run(
+                f"MATCH (n:`{label}`) RETURN count(n) AS c"
+            ).single()
+            node_counts[label] = result["c"]
+
+        rel_counts: Dict[str, int] = {}
+        for rel_type in relationship_types:
+            result = session.run(
+                f"MATCH ()-[r:`{rel_type}`]->() RETURN count(r) AS c"
+            ).single()
+            rel_counts[rel_type] = result["c"]
+
+    logger.info(f"Graph summary: total_nodes={total_nodes} total_relationships={total_rels}")
+    logger.info(
+        "Node counts: "
+        + ", ".join(f"{label}={node_counts.get(label, 0)}" for label in node_types)
+    )
+    logger.info(
+        "Relationship counts: "
+        + ", ".join(f"{rel}={rel_counts.get(rel, 0)}" for rel in relationship_types)
+    )
 
 
 async def main() -> None:
     # Build the knowledge graph from the BRD PDF
+    logger.info(f"Starting KG build from PDF {pdf_path}")
     await kg_builder.run_async(file_path=str(pdf_path))
+    logger.info("KG build completed")
+    log_graph_summary(driver)
 
     # Enumerate all Rule subgraphs and compile them to Rego.
     rules_ir = fetch_rules_ir(driver)
+    total_conditions = sum(len(rule.get("conditions", [])) for rule in rules_ir)
+    avg_conditions = (
+        float(total_conditions) / len(rules_ir) if rules_ir else 0.0
+    )
+    logger.info(
+        f"Rule IR summary: rules={len(rules_ir)} total_conditions={total_conditions} avg_conditions_per_rule={avg_conditions:.1f}"
+    )
 
     # Write outputs next to this script: scripts/GraphRAG/outputs
     outputs_dir = Path(__file__).resolve().parent / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Outputs directory ensured at {outputs_dir}")
 
     # Write an intermediate JSONL representation for inspection.
     ir_path = outputs_dir / "business_inspection.rules.jsonl"
@@ -791,11 +888,15 @@ async def main() -> None:
 
             f.write(json.dumps(rule, ensure_ascii=False))
             f.write("\n")
+    logger.info(
+        f"Wrote IR JSONL to {ir_path} ({ir_path.stat().st_size} bytes, {len(rules_ir)} records)"
+    )
 
     # Emit a Rego module for all rules.
     rego_module = emit_rego_module(rules_ir, package_name="brd.business_inspection")
     rego_path = outputs_dir / "business_inspection.rego"
     rego_path.write_text(rego_module, encoding="utf-8")
+    logger.info(f"Wrote Rego module to {rego_path} ({rego_path.stat().st_size} bytes)")
 
 
 if __name__ == "__main__":
