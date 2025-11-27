@@ -24,8 +24,10 @@ NEO4J_DATABASE=graphrag-test
 
 ## Run
 
+Ensure `OPENAI_API_KEY` is set in your shell or `.env`, then:
+
 ```bash
-OPENAI_API_KEY=<key> uv run python neo4j-graphrag-first-rego.py
+uv run python neo4j-graphrag-first-rego.py
 ```
 
 ## Reliability helpers
