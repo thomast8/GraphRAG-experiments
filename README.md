@@ -26,6 +26,11 @@ NEO4J_DATABASE=graphrag-test
 OPENAI_API_KEY=<key> uv run python neo4j-graphrag-first-rego.py
 ```
 
+## Reliability helpers
+- Structured schema: all LLM output is parsed into a typed `Neo4jGraph` using Pydantic validation (`GraphSchema` / `Neo4jGraph`), so malformed or schema-breaking JSON never makes it into Neo4j as half-written nodes/relationships.
+- Retrying extractor: the custom `RetryingLLMEntityRelationExtractor` wraps GraphRAG’s extractor with `fix_invalid_json` + validation and retries up to 4 times with exponential backoff when the LLM returns invalid JSON or schema violations. Final failures are logged and their raw content, source chunk, and prompt are written to `outputs/failed_json` for inspection instead of silently dropping chunks.
+- Database hygiene: the `graphrag-test` database is wiped at startup so each run starts from a clean slate, and a missing database is automatically created when the server supports multi-DB (falling back to `neo4j` on single-DB servers).
+
 Other assets:
 - `neo4j-graphrag-quickstart.py` – minimal Neo4j GraphRAG bootstrap.
 - `end-to-end-lupus.ipynb` – notebook experiment.
