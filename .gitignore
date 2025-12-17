@@ -5,3 +5,4 @@ outputs/
 __pycache__/
 .DS_Store
 *.pyc
+BRD-examples/Business_Inspection_Policy_Document.pdf
